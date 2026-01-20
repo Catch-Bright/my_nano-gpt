@@ -74,6 +74,7 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    bias: bool = True
 
 class GPT(nn.Module):
     def __init__(self, config):
@@ -144,3 +145,8 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+    
+#----------------------------------------------------------------
+model=GPT.from_pretrained('gpt2')
+print("successfully loaded pretrained model!")
+print('hihi')
