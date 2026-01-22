@@ -89,7 +89,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
-    def forward(self,idx):
+    def forward(self,idx,targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, "Cannot forward, model block size is exhausted."
         pos=torch.arange(0, T, dtype=torch.long, device=idx.device)  # shape (T)
@@ -100,7 +100,10 @@ class GPT(nn.Module):
             x=block(x)
         x=self.transformer.ln_f(x)  # (B, T, n_embd)
         logits=self.lm_head(x)  # (B, T, vocab_size)
-        return logits
+        loss=None
+        if targets is not None:
+            loss=F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits,loss
     
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
@@ -165,35 +168,67 @@ if torch.cuda.is_available():
     device='cuda'
 print("using device:", device)
 
-num_return_sequences=5
-max_length=30
+#get a data batch
+import tiktoken
+enc=tiktoken.get_encoding("gpt2")
+with open('input.txt', 'r', ) as f:
+    text=f.read()
+text=text[:1000]
+tokens = enc.encode(text)
+B,T=4,32  # batch size, sequence length
+buf=torch.tensor(tokens[:B*T+1])
+x=buf[:-1].view(B,T).to(device)  # (B,T)
+y=buf[1:].view(B,T).to(device)   # (B,T)
 
-#model=GPT.from_pretrained('gpt2')
+#get logits
 model=GPT(GPTConfig())
-model.eval()
 model.to(device)
 
-#prefix tokens
-import tiktoken
-tokenizer = tiktoken.get_encoding("gpt2")
-tokens=tokenizer.encode("Hello, I'm a language model,")
-tokens=torch.tensor(tokens, dtype=torch.long)  # (8,)
-tokens=tokens.unsqueeze(0).repeat(num_return_sequences,1) # (num_return_sequences, 8)
-x=tokens.to(device)  # (num_return_sequences, 8)
+#optimize!
+optimizer=torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+    optimizer.zero_grad()
+    logits,loss=model(x,y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss {loss.item()}")
 
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while x.size(1)<max_length:
-    with torch.no_grad():
-        logits=model(x)  # (num_return_sequences, T, vocab_size)
-        logits=logits[:, -1, :]  # (num_return_sequences, vocab_size)
-        probs=F.softmax(logits, dim=-1)  # (num_return_sequences, vocab_size)
-        topk_probs, topk_indices=torch.topk(probs, 50, dim=-1)  # each is (num_return_sequences, 10)
-        ix = torch.multinomial(topk_probs, num_samples=1)  # (num_return_sequences, 1)
-        xcol=torch.gather(topk_indices, -1, ix)  # (num_return_sequences, 1)
-        x=torch.cat((x, xcol), dim=1)  # (num_return_sequences, T+1)
+# logits,loss=model(x,y)
+# print(loss)  #(B, T, vocab_size)
+import sys;sys.exit(0)
 
-for i in range(num_return_sequences):
-    tokens=x[i,:max_length].tolist()
-    decoded=tokenizer.decode(tokens)
-    print(">",decoded)
+
+#inference  test
+
+# num_return_sequences=5
+# max_length=30
+
+# #model=GPT.from_pretrained('gpt2')
+# model=GPT(GPTConfig())
+# model.eval()
+# model.to(device)
+
+# #prefix tokens
+# import tiktoken
+# tokenizer = tiktoken.get_encoding("gpt2")
+# tokens=tokenizer.encode("Hello, I'm a language model,")
+# tokens=torch.tensor(tokens, dtype=torch.long)  # (8,)
+# tokens=tokens.unsqueeze(0).repeat(num_return_sequences,1) # (num_return_sequences, 8)
+# x=tokens.to(device)  # (num_return_sequences, 8)
+
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
+# while x.size(1)<max_length:
+#     with torch.no_grad():
+#         logits=model(x)  # (num_return_sequences, T, vocab_size)
+#         logits=logits[:, -1, :]  # (num_return_sequences, vocab_size)
+#         probs=F.softmax(logits, dim=-1)  # (num_return_sequences, vocab_size)
+#         topk_probs, topk_indices=torch.topk(probs, 50, dim=-1)  # each is (num_return_sequences, 10)
+#         ix = torch.multinomial(topk_probs, num_samples=1)  # (num_return_sequences, 1)
+#         xcol=torch.gather(topk_indices, -1, ix)  # (num_return_sequences, 1)
+#         x=torch.cat((x, xcol), dim=1)  # (num_return_sequences, T+1)
+
+# for i in range(num_return_sequences):
+#     tokens=x[i,:max_length].tolist()
+#     decoded=tokenizer.decode(tokens)
+#     print(">",decoded)
