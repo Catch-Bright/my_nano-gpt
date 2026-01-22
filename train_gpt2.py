@@ -226,6 +226,8 @@ if torch.cuda.is_available():
 #get data
 train_loader=DataloaderLite(B=4, T=1024)
 
+torch.set_float32_matmul_precision('high')
+
 #get logits
 model=GPT(GPTConfig())
 model.to(device)
