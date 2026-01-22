@@ -89,6 +89,19 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
+    def forward(self,idx):
+        B, T = idx.size()
+        assert T <= self.config.block_size, "Cannot forward, model block size is exhausted."
+        pos=torch.arange(0, T, dtype=torch.long, device=idx.device)  # shape (T)
+        pos_emb=self.transformer.wpe(pos)  # (T, n_embd)
+        tok_emb=self.transformer.wte(idx)  # (B, T, n_embd)
+        x=pos_emb + tok_emb  # (B, T, n_embd)
+        for block in self.transformer.h:
+            x=block(x)
+        x=self.transformer.ln_f(x)  # (B, T, n_embd)
+        logits=self.lm_head(x)  # (B, T, vocab_size)
+        return logits
+    
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
@@ -147,6 +160,34 @@ class GPT(nn.Module):
         return model
     
 #----------------------------------------------------------------
+num_return_sequences=5
+max_length=30
+
 model=GPT.from_pretrained('gpt2')
-print("successfully loaded pretrained model!")
-print('hihi')
+model.eval()
+model.to('cuda')
+
+#prefix tokens
+import tiktoken
+tokenizer = tiktoken.get_encoding("gpt2")
+tokens=tokenizer.encode("Hello, I'm a language model,")
+tokens=torch.tensor(tokens, dtype=torch.long)  # (8,)
+tokens=tokens.unsqueeze(0).repeat(num_return_sequences,1) # (num_return_sequences, 8)
+x=tokens.to('cuda')
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1)<max_length:
+    with torch.no_grad():
+        logits=model(x)  # (num_return_sequences, T, vocab_size)
+        logits=logits[:, -1, :]  # (num_return_sequences, vocab_size)
+        probs=F.softmax(logits, dim=-1)  # (num_return_sequences, vocab_size)
+        topk_probs, topk_indices=torch.topk(probs, 50, dim=-1)  # each is (num_return_sequences, 10)
+        ix = torch.multinomial(topk_probs, num_samples=1)  # (num_return_sequences, 1)
+        xcol=torch.gather(topk_indices, -1, ix)  # (num_return_sequences, 1)
+        x=torch.cat((x, xcol), dim=1)  # (num_return_sequences, T+1)
+
+for i in range(num_return_sequences):
+    tokens=x[i,:max_length].tolist()
+    decoded=tokenizer.decode(tokens)
+    print(">",decoded)
