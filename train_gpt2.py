@@ -29,12 +29,15 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
-        # compute attention scores
-        att = (q @ k.transpose(-2, -1)) * (1.0/math.sqrt(k.size(-1)))  # (B, nh, T, T)
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)  # (B, nh, T, T)
+        # # compute attention scores
+        # att = (q @ k.transpose(-2, -1)) * (1.0/math.sqrt(k.size(-1)))  # (B, nh, T, T)
+        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # att = F.softmax(att, dim=-1)  # (B, nh, T, T)
 
-        y = att @ v  # (B, nh, T, hs)
+        # y = att @ v  # (B, nh, T, hs)
+
+        y=F.scaled_dot_product_attention(q, k, v, is_causal=True)  # (B, nh, T, hs)
+
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
 
         y = self.c_proj(y)  # (B, T, C)
@@ -231,6 +234,7 @@ torch.set_float32_matmul_precision('high')
 #get logits
 model=GPT(GPTConfig())
 model.to(device)
+model=torch.compile(model)
 
 #optimize!
 optimizer=torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -239,7 +243,8 @@ for i in range(50):
     x,y=train_loader.next_batch()
     x,y=x.to(device),y.to(device)
     optimizer.zero_grad()
-    logits,loss=model(x,y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits,loss=model(x,y)
     loss.backward()
     optimizer.step()
     torch.cuda.synchronize()
