@@ -5,6 +5,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import os
 
 # -------------------------------------------------
 
@@ -241,12 +242,29 @@ class DataloaderLite:
         return x,y
     
 # -------------------------------------------------
+#torchrun --standalone --nproc_per_node=8 train_gpt2.py
+#run the training loop
+from torch.distributed import init_process_group, destroy_process_group
 
-
-device='cpu'
-if torch.cuda.is_available():
-    device='cuda'
-print("using device:", device)
+ddp=int(os.environ.get('RANK',-1)) != -1
+if ddp:
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank=int(os.environ['RANK'])
+    ddp_local_rank=int(os.environ['LOCAL_RANK'])
+    ddp_world_size=int(os.environ['WORLD_SIZE'])
+    device=f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0
+else:
+    ddp_rank=0
+    ddp_local_rank=0
+    ddp_world_size=1
+    master_process = True
+    device='cpu'
+    if torch.cuda.is_available():
+        device='cuda'
+    print("using device:", device)
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
@@ -255,11 +273,15 @@ if torch.cuda.is_available():
 total_batch_size=524288  #32*16384
 B=16
 T=1024
-assert total_batch_size % (B*T) == 0
-gradient_accum_steps=total_batch_size // (B*T)
-print(f"total_desired_batch_size={total_batch_size}")
-print(f"=>calculated gradient_accum_steps={gradient_accum_steps}")
+assert total_batch_size % (B*T*ddp_world_size) == 0
+gradient_accum_steps=total_batch_size // (B*T*ddp_world_size)
+if master_process:
+    print(f"total_desired_batch_size={total_batch_size}")
+    print(f"=>calculated gradient_accum_steps={gradient_accum_steps}")
 
+print("I am GPU",ddp_rank)
+print("Bye")
+import sys;sys.exit(0)
 #get data
 train_loader=DataloaderLite(B=B, T=T)
 
