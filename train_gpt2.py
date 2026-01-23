@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import os
+import torch.distributed as dist
 
 # -------------------------------------------------
 
@@ -227,7 +228,8 @@ class DataloaderLite:
         enc=tiktoken.get_encoding("gpt2")
         tokens=enc.encode(text)
         self.tokens=torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
+        if master_process:
+            print(f"loaded {len(self.tokens)} tokens")
 
         #state
         self.current_position=self.B*self.T*self.process_rank  #each process start at different position
@@ -292,6 +294,7 @@ model.to(device)
 model=torch.compile(model)
 if ddp:
     model=DDP(model, device_ids=[ddp_local_rank])
+raw_model=model.module if ddp else model
 
 max_lr=6e-4
 min_lr=max_lr*0.1
@@ -307,7 +310,7 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (max_lr - min_lr)
 
-optimizer=model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+optimizer=raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
 for i in range(max_steps):
     t0=time.time()
@@ -320,7 +323,11 @@ for i in range(max_steps):
             logits,loss=model(x,y)
         loss=loss/gradient_accum_steps
         loss_accum+=loss.detach()
+        if ddp:
+            model.require_backward_grad_sync=(micro_step==gradient_accum_steps-1)
         loss.backward()
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm=torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr=get_lr(i)
     for param_group in optimizer.param_groups:
@@ -329,10 +336,13 @@ for i in range(max_steps):
     torch.cuda.synchronize()
     t1=time.time()
     dt=(t1-t0)*1000  #ms
-    token_processed=train_loader.B*train_loader.T*gradient_accum_steps
+    token_processed=train_loader.B*train_loader.T*gradient_accum_steps*ddp_world_size
     token_per_sec=token_processed/(t1-t0)
-    print(f"step {i}, loss {loss_accum.item():.6f}, lr:{lr:.4e} ,norm:{norm:.4f}, dt: {dt:.2f}ms, {token_per_sec:.2f} tokens/sec")
+    if master_process:
+        print(f"step {i}, loss {loss_accum.item():.6f}, lr:{lr:.4e} ,norm:{norm:.4f}, dt: {dt:.2f}ms, {token_per_sec:.2f} tokens/sec")
 
+if ddp:
+    destroy_process_group()
 # logits,loss=model(x,y)
 # print(loss)  #(B, T, vocab_size)
 import sys;sys.exit(0)
