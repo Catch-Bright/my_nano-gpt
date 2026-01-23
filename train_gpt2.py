@@ -236,9 +236,24 @@ model=GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model=torch.compile(model)
 
+max_lr=3e-4
+min_lr=max_lr*0.1
+warmup_steps=10
+max_steps=50
+def get_lr(it):
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    if it > max_steps:
+        return min_lr
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0.0 <= decay_ratio <= 1.0
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
+
+
 #optimize!
 optimizer=torch.optim.AdamW(model.parameters(), lr=3e-4,betas=(0.9,0.95),eps=1e-8)
-for i in range(50):
+for i in range(max_steps):
     t0=time.time()
     x,y=train_loader.next_batch()
     x,y=x.to(device),y.to(device)
@@ -247,12 +262,15 @@ for i in range(50):
         logits,loss=model(x,y)
     loss.backward()
     norm=torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    lr=get_lr(i)
+    for param_group in optimizer.param_groups:
+        param_group['lr']=lr
     optimizer.step()
     torch.cuda.synchronize()
     t1=time.time()
     dt=(t1-t0)*1000
     token_per_sec=(train_loader.B*train_loader.T)/(t1-t0)
-    print(f"step {i}, loss {loss.item()}, norm:{norm:.4f}, dt: {dt:.2f}ms, {token_per_sec:.2f} tokens/sec")
+    print(f"step {i}, loss {loss.item()}, lr:{lr:.4e} ,norm:{norm:.4f}, dt: {dt:.2f}ms, {token_per_sec:.2f} tokens/sec")
 
 # logits,loss=model(x,y)
 # print(loss)  #(B, T, vocab_size)
