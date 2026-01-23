@@ -216,9 +216,11 @@ class GPT(nn.Module):
 #----------------------------------------------------------------
 import tiktoken
 class DataloaderLite:
-    def __init__(self,B,T):
+    def __init__(self,B,T,process_rank,num_processes):
         self.B=B
         self.T=T
+        self.process_rank=process_rank
+        self.num_processes=num_processes
 
         with open('input.txt', 'r') as f:
             text=f.read()
@@ -226,25 +228,25 @@ class DataloaderLite:
         tokens=enc.encode(text)
         self.tokens=torch.tensor(tokens)
         print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch={len(self.tokens)//(B*T)} batches")
 
         #state
-        self.current_position=0
+        self.current_position=self.B*self.T*self.process_rank  #each process start at different position
     
     def next_batch(self):
         B,T=self.B,self.T
         buf = self.tokens[self.current_position:self.current_position + B*T + 1]
         x=buf[:-1].view(B,T)
         y=buf[1:].view(B,T)
-        self.current_position += B*T
-        if self.current_position + B*T + 1 > len(self.tokens):
-            self.current_position=0  #reset for next epoch
+        self.current_position += B*T*self.num_processes
+        if self.current_position + (B*T*self.num_processes + 1) > len(self.tokens):
+            self.current_position=self.B*self.T*self.process_rank  #reset for next epoch
         return x,y
     
 # -------------------------------------------------
 #torchrun --standalone --nproc_per_node=8 train_gpt2.py
 #run the training loop
 from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 ddp=int(os.environ.get('RANK',-1)) != -1
 if ddp:
@@ -279,11 +281,8 @@ if master_process:
     print(f"total_desired_batch_size={total_batch_size}")
     print(f"=>calculated gradient_accum_steps={gradient_accum_steps}")
 
-print("I am GPU",ddp_rank)
-print("Bye")
-import sys;sys.exit(0)
 #get data
-train_loader=DataloaderLite(B=B, T=T)
+train_loader=DataloaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
 
 torch.set_float32_matmul_precision('high')
 
@@ -291,6 +290,8 @@ torch.set_float32_matmul_precision('high')
 model=GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model=torch.compile(model)
+if ddp:
+    model=DDP(model, device_ids=[ddp_local_rank])
 
 max_lr=6e-4
 min_lr=max_lr*0.1
