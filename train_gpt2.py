@@ -252,8 +252,16 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
+total_batch_size=524288  #32*16384
+B=16
+T=1024
+assert total_batch_size % (B*T) == 0
+gradient_accum_steps=total_batch_size // (B*T)
+print(f"total_desired_batch_size={total_batch_size}")
+print(f"=>calculated gradient_accum_steps={gradient_accum_steps}")
+
 #get data
-train_loader=DataloaderLite(B=4, T=1024)
+train_loader=DataloaderLite(B=B, T=T)
 
 torch.set_float32_matmul_precision('high')
 
@@ -262,7 +270,7 @@ model=GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model=torch.compile(model)
 
-max_lr=3e-4
+max_lr=6e-4
 min_lr=max_lr*0.1
 warmup_steps=10
 max_steps=50
@@ -280,12 +288,16 @@ optimizer=model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, devic
 
 for i in range(max_steps):
     t0=time.time()
-    x,y=train_loader.next_batch()
-    x,y=x.to(device),y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits,loss=model(x,y)
-    loss.backward()
+    loss_accum=0.0
+    for micro_step in range(gradient_accum_steps):
+        x,y=train_loader.next_batch()
+        x,y=x.to(device),y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits,loss=model(x,y)
+        loss=loss/gradient_accum_steps
+        loss_accum+=loss.detach()
+        loss.backward()
     norm=torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr=get_lr(i)
     for param_group in optimizer.param_groups:
@@ -293,9 +305,10 @@ for i in range(max_steps):
     optimizer.step()
     torch.cuda.synchronize()
     t1=time.time()
-    dt=(t1-t0)*1000
-    token_per_sec=(train_loader.B*train_loader.T)/(t1-t0)
-    print(f"step {i}, loss {loss.item()}, lr:{lr:.4e} ,norm:{norm:.4f}, dt: {dt:.2f}ms, {token_per_sec:.2f} tokens/sec")
+    dt=(t1-t0)*1000  #ms
+    token_processed=train_loader.B*train_loader.T*gradient_accum_steps
+    token_per_sec=token_processed/(t1-t0)
+    print(f"step {i}, loss {loss_accum.item():.6f}, lr:{lr:.4e} ,norm:{norm:.4f}, dt: {dt:.2f}ms, {token_per_sec:.2f} tokens/sec")
 
 # logits,loss=model(x,y)
 # print(loss)  #(B, T, vocab_size)
